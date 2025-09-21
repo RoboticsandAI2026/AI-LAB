@@ -1,0 +1,29 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isSastra() {
+      return isSignedIn() && request.auth.token.email.matches('(?i).+@sastra\\.ac\\.in$');
+    }
+
+    // Profiles keyed by UID
+    match /users/{uid} {
+      allow read, write: if isSastra() && request.auth.uid == uid;
+    }
+
+    // Maps loginId -> { email, uid }
+    match /loginLookup/{loginId} {
+      allow read, write: if isSastra();
+    }
+
+    // Everything else defaults to sastra users only
+    match /{document=**} {
+      allow read, write: if isSastra();
+    }
+  }
+}
