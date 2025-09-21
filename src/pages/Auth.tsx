@@ -8,7 +8,12 @@ import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
 
 import { auth, db } from "../firebaseConfig";
-import { signInWithEmailAndPassword, GoogleAuthProvider, signInWithPopup, signOut } from "firebase/auth";
+import {
+  signInWithEmailAndPassword,
+  GoogleAuthProvider,
+  signInWithPopup,
+  signOut,
+} from "firebase/auth";
 import { doc, getDoc } from "firebase/firestore";
 
 const Auth = () => {
@@ -19,10 +24,10 @@ const Auth = () => {
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
 
-  const handleLogin = async () => {
+  const handlePasswordLogin = async () => {
     setBusy(true);
     try {
-      // 1) Map loginId -> { email, uid }
+      // Map loginId -> { email, uid }
       const lookupSnap = await getDoc(doc(db, "loginLookup", loginId));
       if (!lookupSnap.exists()) {
         toast({
@@ -35,41 +40,36 @@ const Auth = () => {
       }
       const { email } = lookupSnap.data() as { email: string; uid: string };
 
-      // 2) Sign in with email/password
+      // Email/password (for Admins or any email users you add)
       await signInWithEmailAndPassword(auth, email, password);
 
-      // 3) Always read the profile using the signed-in user's UID
       const currentUid = auth.currentUser?.uid;
       if (!currentUid) throw new Error("Signed in, but no auth user UID found.");
       const profSnap = await getDoc(doc(db, "users", currentUid));
-      if (!profSnap.exists()) {
-        throw new Error("Profile not found. Contact admin.");
-      }
+      if (!profSnap.exists()) throw new Error("Profile not found.");
+
       const profile = profSnap.data() as any;
 
-      // 4) Persist session
       localStorage.setItem("name", profile.name || "");
       localStorage.setItem("email", profile.email || email);
       localStorage.setItem("loginId", profile.loginId || loginId);
       localStorage.setItem("role", profile.role || "");
 
-      // 5) Route by role
       if (profile.role === "ADMIN") navigate("/dashboard/admin");
       else if (profile.role === "FACULTY") navigate("/dashboard/faculty");
       else navigate("/dashboard/student");
     } catch (err: any) {
-      console.error("[login] failed", err);
+      console.error("[password login] failed", err);
       toast({
         variant: "destructive",
         title: "Login failed",
-        description: err?.message || "Check your Login ID and Password.",
+        description: err?.message || "Check your Login ID and password.",
       });
     } finally {
       setBusy(false);
     }
   };
 
-  // Google login for accounts created with Google during signup
   const handleGoogleLogin = async () => {
     try {
       const provider = new GoogleAuthProvider();
@@ -77,27 +77,27 @@ const Auth = () => {
       const result = await signInWithPopup(auth, provider);
       const gUser = result.user;
       const email = (gUser.email || "").toLowerCase();
+
       if (!/@sastra\.ac\.in$/.test(email)) {
         await signOut(auth);
-        toast({
+        return toast({
           title: "Only @sastra.ac.in allowed",
           description: "Please use your official SASTRA email.",
           variant: "destructive",
         });
-        return;
       }
 
       const uid = gUser.uid;
       const profSnap = await getDoc(doc(db, "users", uid));
       if (!profSnap.exists()) {
-        toast({
+        await signOut(auth);
+        return toast({
           title: "Profile not found",
-          description: "Complete signup first.",
+          description: "Please complete signup first.",
           variant: "destructive",
         });
-        await signOut(auth);
-        return;
       }
+
       const profile = profSnap.data() as any;
 
       localStorage.setItem("name", profile.name || gUser.displayName || "");
@@ -141,7 +141,7 @@ const Auth = () => {
               onChange={(e) => setPassword(e.target.value)}
             />
           </div>
-          <Button className="w-full" onClick={handleLogin} disabled={busy}>
+          <Button className="w-full" onClick={handlePasswordLogin} disabled={busy}>
             {busy ? "Logging in…" : "Log In"}
           </Button>
 
@@ -156,10 +156,7 @@ const Auth = () => {
 
           <div className="text-sm text-center">
             Don’t have an account?{" "}
-            <button
-              className="underline"
-              onClick={() => navigate("/signup")}
-            >
+            <button className="underline" onClick={() => navigate("/signup")}>
               Sign up
             </button>
           </div>
