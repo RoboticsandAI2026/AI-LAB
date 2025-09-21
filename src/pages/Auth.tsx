@@ -22,7 +22,7 @@ const Auth = () => {
   const handlePasswordLogin = async () => {
     setBusy(true);
     try {
-      // Map loginId -> { email, uid }
+      // Map loginId -> { email, uid } stored during signup
       const lookupSnap = await getDoc(doc(db, "loginLookup", loginId));
       if (!lookupSnap.exists()) {
         toast({
@@ -37,10 +37,10 @@ const Auth = () => {
 
       await signInWithEmailAndPassword(auth, email, password);
 
-      const currentUid = auth.currentUser?.uid;
-      if (!currentUid) throw new Error("Signed in, but no auth user UID found.");
+      const uid = auth.currentUser?.uid;
+      if (!uid) throw new Error("Signed in, but no auth UID found.");
 
-      const profSnap = await getDoc(doc(db, "users", currentUid));
+      const profSnap = await getDoc(doc(db, "users", uid));
       if (!profSnap.exists()) throw new Error("Profile not found.");
 
       const profile = profSnap.data() as any;
@@ -77,7 +77,7 @@ const Auth = () => {
             <Input
               value={loginId}
               onChange={(e) => setLoginId(e.target.value)}
-              placeholder="S123456 / F6789 / A0001"
+              placeholder="e.g., 126179012 or F3210 or A0001"
             />
           </div>
           <div>
