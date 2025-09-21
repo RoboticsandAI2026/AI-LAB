@@ -1,35 +1,38 @@
 import { setGlobalOptions } from "firebase-functions/v2";
 import { onCall, HttpsError } from "firebase-functions/v2/https";
-import * as functions from "firebase-functions"; // for config()
+import * as functions from "firebase-functions"; // for functions.config()
 import { initializeApp } from "firebase-admin/app";
 import { getFirestore, FieldValue, Timestamp } from "firebase-admin/firestore";
 import { getAuth as getAdminAuth } from "firebase-admin/auth";
 import nodemailer from "nodemailer";
 import crypto from "crypto";
 
+// 💡 keep region in sync with your client: getFunctions(app, "us-central1")
 setGlobalOptions({ region: "us-central1", maxInstances: 10 });
 initializeApp();
 
 const db = getFirestore();
 const adminAuth = getAdminAuth();
 
-// runtime config (set via `firebase functions:config:set ...`)
+// Runtime config (set via: firebase functions:config:set ...)
 const cfg = functions.config() as any;
 
-const SMTP_EMAIL = cfg.smtp?.email;
-const SMTP_PASS  = cfg.smtp?.pass;
-const SMTP_HOST  = cfg.smtp?.host || "smtp.gmail.com";
-const SMTP_PORT  = Number(cfg.smtp?.port || 465);
+const SMTP_EMAIL  = cfg.smtp?.email;
+const SMTP_PASS   = cfg.smtp?.pass;
+const SMTP_HOST   = cfg.smtp?.host || "smtp.gmail.com";
+const SMTP_PORT   = Number(cfg.smtp?.port || 465);
 const SMTP_SECURE = (cfg.smtp?.secure ?? "true") !== "false";
-const MAIL_FROM  = cfg.mail?.from || "SASTRA AI Lab <no-reply@example.com>";
-const OTP_SALT   = cfg.otp?.salt || "CHANGE_ME_SALT";
+const MAIL_FROM   = cfg.mail?.from || "SASTRA AI Lab <no-reply@example.com>";
+const OTP_SALT    = cfg.otp?.salt || "CHANGE_ME_SALT";
 
 const transporter = nodemailer.createTransport({
-  host: SMTP_HOST, port: SMTP_PORT, secure: SMTP_SECURE,
+  host: SMTP_HOST,
+  port: SMTP_PORT,
+  secure: SMTP_SECURE,
   auth: { user: SMTP_EMAIL, pass: SMTP_PASS },
 });
 
-const OTP_TTL_MS = 10 * 60 * 1000; // 10 min
+const OTP_TTL_MS = 10 * 60 * 1000; // 10 minutes
 const MAX_ATTEMPTS = 5;
 
 function newOtp(): string {
@@ -39,7 +42,8 @@ function hashOtp(otp: string): string {
   return crypto.createHmac("sha256", OTP_SALT).update(otp).digest("hex");
 }
 function maskEmail(email: string): string {
-  const [n, d] = email.split("@"); if (!n || !d) return email;
+  const [n, d] = email.split("@");
+  if (!n || !d) return email;
   const shown = n.length <= 2 ? n[0] : n.slice(0, 2);
   return `${shown}${"*".repeat(Math.max(1, n.length - shown.length))}@${d}`;
 }
@@ -51,6 +55,7 @@ export const sendPasswordOtp = onCall(async (req) => {
     throw new HttpsError("invalid-argument", "loginId is required");
   }
 
+  // Map loginId -> { email, uid }
   const mapSnap = await db.doc(`loginLookup/${loginId}`).get();
   if (!mapSnap.exists) throw new HttpsError("not-found", "No user found for this Login ID");
   const { email, uid } = mapSnap.data() as { email: string; uid: string };
@@ -61,7 +66,9 @@ export const sendPasswordOtp = onCall(async (req) => {
   const now = Date.now();
 
   await db.doc(`passwordOtps/${sessionId}`).set({
-    uid, email, codeHash,
+    uid,
+    email,
+    codeHash,
     attempts: 0,
     createdAt: Timestamp.fromMillis(now),
     expiresAt: Timestamp.fromMillis(now + OTP_TTL_MS),
@@ -88,7 +95,9 @@ If you didn’t request this, you can ignore this email.
 
 /** verifyPasswordOtp({ sessionId, otp, newPassword }) → { ok: true } */
 export const verifyPasswordOtp = onCall(async (req) => {
-  const { sessionId, otp, newPassword } = (req.data || {}) as { sessionId?: string; otp?: string; newPassword?: string };
+  const { sessionId, otp, newPassword } =
+    (req.data || {}) as { sessionId?: string; otp?: string; newPassword?: string };
+
   if (!sessionId || !otp || !newPassword) {
     throw new HttpsError("invalid-argument", "sessionId, otp, newPassword are required");
   }
@@ -101,10 +110,12 @@ export const verifyPasswordOtp = onCall(async (req) => {
   if (!snap.exists) throw new HttpsError("not-found", "Session not found or expired");
 
   const data = snap.data() as any;
+
   if (data.expiresAt?.toMillis?.() < Date.now()) {
     await ref.delete();
     throw new HttpsError("deadline-exceeded", "OTP expired. Please request a new one.");
   }
+
   if ((data.attempts ?? 0) >= MAX_ATTEMPTS) {
     await ref.delete();
     throw new HttpsError("resource-exhausted", "Too many attempts. Request a new OTP.");
@@ -118,5 +129,6 @@ export const verifyPasswordOtp = onCall(async (req) => {
 
   await adminAuth.updateUser(data.uid as string, { password: newPassword });
   await ref.delete();
+
   return { ok: true };
 });
