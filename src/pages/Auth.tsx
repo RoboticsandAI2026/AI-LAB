@@ -22,7 +22,7 @@ const Auth = () => {
   const handlePasswordLogin = async () => {
     setBusy(true);
     try {
-      // Map loginId -> { email, uid } stored during signup
+      // 1) Map loginId -> email
       const lookupSnap = await getDoc(doc(db, "loginLookup", loginId));
       if (!lookupSnap.exists()) {
         toast({
@@ -35,21 +35,24 @@ const Auth = () => {
       }
       const { email } = lookupSnap.data() as { email: string; uid: string };
 
+      // 2) Email/password sign-in
       await signInWithEmailAndPassword(auth, email, password);
 
+      // 3) Load profile by UID
       const uid = auth.currentUser?.uid;
-      if (!uid) throw new Error("Signed in, but no auth UID found.");
-
+      if (!uid) throw new Error("Signed in, but no Auth UID found.");
       const profSnap = await getDoc(doc(db, "users", uid));
       if (!profSnap.exists()) throw new Error("Profile not found.");
 
       const profile = profSnap.data() as any;
 
+      // 4) Persist session
       localStorage.setItem("name", profile.name || "");
       localStorage.setItem("email", profile.email || email);
       localStorage.setItem("loginId", profile.loginId || loginId);
       localStorage.setItem("role", profile.role || "");
 
+      // 5) Route by role
       if (profile.role === "ADMIN") navigate("/dashboard/admin");
       else if (profile.role === "FACULTY") navigate("/dashboard/faculty");
       else navigate("/dashboard/student");
