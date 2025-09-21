@@ -158,7 +158,6 @@ export default function Auth() {
           <div>
             <div className="flex items-center justify-between">
               <Label>Password</Label>
-              {/* 👇 This is the visible link */}
               <button
                 type="button"
                 onClick={openForgot}
