@@ -1,5 +1,5 @@
 // src/firebaseConfig.ts
-// Exports: app, auth, db, functions
+// Exports: app, auth, db, functions (needed for OTP callables)
 
 import { initializeApp, getApps } from "firebase/app";
 import { getAuth } from "firebase/auth";
@@ -14,17 +14,17 @@ const firebaseConfig = {
   storageBucket: import.meta?.env?.VITE_FIREBASE_STORAGE_BUCKET ?? "lab-access-d86aa.firebasestorage.app",
   messagingSenderId: import.meta?.env?.VITE_FIREBASE_MESSAGING_SENDER_ID ?? "723555284521",
   appId: import.meta?.env?.VITE_FIREBASE_APP_ID ?? "1:723555284521:web:819e8003d7fbc7dd5b8e38",
-  measurementId: import.meta?.env?.VITE_FIREBASE_MEASUREMENT_ID ?? "G-JXQ7XTCZW2",
+  measurementId: import.meta?.env?.VITE_FIREBASE_MEASUREMENT_ID ?? "G-JXQ7XTCZW2"
 };
 
 export const app = getApps().length ? getApps()[0] : initializeApp(firebaseConfig);
 export const auth = getAuth(app);
 export const db = getFirestore(app);
 
-// IMPORTANT: this region must match your Functions deploy
+// must match your Functions deploy region
 export const functions = getFunctions(app, "us-central1");
 
-// (Optional) Emulators
+// optional emulators for local dev
 try {
   if (import.meta?.env?.VITE_USE_FIRESTORE_EMULATOR === "true") {
     connectFirestoreEmulator(db, "127.0.0.1", Number(import.meta.env.VITE_FIRESTORE_EMULATOR_PORT || 8080));
