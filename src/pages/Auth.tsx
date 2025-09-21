@@ -8,7 +8,7 @@ import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
 
 import { auth, db } from "../firebaseConfig";
-import { signInWithEmailAndPassword } from "firebase/auth";
+import { signInWithEmailAndPassword, GoogleAuthProvider, signInWithPopup, signOut } from "firebase/auth";
 import { doc, getDoc } from "firebase/firestore";
 
 const Auth = () => {
@@ -20,18 +20,9 @@ const Auth = () => {
   const [busy, setBusy] = useState(false);
 
   const handleLogin = async () => {
-    if (!loginId || !password) {
-      toast({
-        variant: "destructive",
-        title: "Missing fields",
-        description: "Enter Login ID and password.",
-      });
-      return;
-    }
-
     setBusy(true);
     try {
-      // 1) Resolve loginId -> email
+      // 1) Map loginId -> { email, uid }
       const lookupSnap = await getDoc(doc(db, "loginLookup", loginId));
       if (!lookupSnap.exists()) {
         toast({
@@ -66,17 +57,69 @@ const Auth = () => {
       if (profile.role === "ADMIN") navigate("/dashboard/admin");
       else if (profile.role === "FACULTY") navigate("/dashboard/faculty");
       else navigate("/dashboard/student");
-    } catch (e: any) {
-      console.error("[Auth] login failed", e);
-      const msg = e?.message || "Invalid credentials.";
-      toast({ variant: "destructive", title: "Login failed", description: msg });
+    } catch (err: any) {
+      console.error("[login] failed", err);
+      toast({
+        variant: "destructive",
+        title: "Login failed",
+        description: err?.message || "Check your Login ID and Password.",
+      });
     } finally {
       setBusy(false);
     }
   };
 
+  // Google login for accounts created with Google during signup
+  const handleGoogleLogin = async () => {
+    try {
+      const provider = new GoogleAuthProvider();
+      provider.setCustomParameters({ hd: "sastra.ac.in", prompt: "select_account" });
+      const result = await signInWithPopup(auth, provider);
+      const gUser = result.user;
+      const email = (gUser.email || "").toLowerCase();
+      if (!/@sastra\.ac\.in$/.test(email)) {
+        await signOut(auth);
+        toast({
+          title: "Only @sastra.ac.in allowed",
+          description: "Please use your official SASTRA email.",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      const uid = gUser.uid;
+      const profSnap = await getDoc(doc(db, "users", uid));
+      if (!profSnap.exists()) {
+        toast({
+          title: "Profile not found",
+          description: "Complete signup first.",
+          variant: "destructive",
+        });
+        await signOut(auth);
+        return;
+      }
+      const profile = profSnap.data() as any;
+
+      localStorage.setItem("name", profile.name || gUser.displayName || "");
+      localStorage.setItem("email", profile.email || email);
+      localStorage.setItem("loginId", profile.loginId || "");
+      localStorage.setItem("role", profile.role || "STUDENT");
+
+      if (profile.role === "ADMIN") navigate("/dashboard/admin");
+      else if (profile.role === "FACULTY") navigate("/dashboard/faculty");
+      else navigate("/dashboard/student");
+    } catch (err: any) {
+      console.error("[google login] failed", err);
+      toast({
+        title: "Google login failed",
+        description: err?.message || "Something went wrong.",
+        variant: "destructive",
+      });
+    }
+  };
+
   return (
-    <div className="min-h-screen grid place-items-center p-6">
+    <div className="min-h-screen flex items-center justify-center p-4">
       <Card className="max-w-md w-full">
         <CardHeader className="text-center">
           <CardTitle>Log In</CardTitle>
@@ -101,6 +144,16 @@ const Auth = () => {
           <Button className="w-full" onClick={handleLogin} disabled={busy}>
             {busy ? "Logging in…" : "Log In"}
           </Button>
+
+          <div className="relative py-2 text-center text-xs text-muted-foreground">
+            <span className="px-2 bg-background relative z-10">or</span>
+            <div className="absolute left-0 right-0 top-1/2 -translate-y-1/2 border-t" />
+          </div>
+
+          <Button variant="outline" className="w-full" onClick={handleGoogleLogin}>
+            Continue with Google (@sastra.ac.in)
+          </Button>
+
           <div className="text-sm text-center">
             Don’t have an account?{" "}
             <button
