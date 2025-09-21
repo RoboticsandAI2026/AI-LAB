@@ -7,21 +7,21 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/components/ui/use-toast";
 
-import { auth, db, functions } from "../firebaseConfig";
+import { auth, db, functions } from "@/firebaseConfig";
 import { signInWithEmailAndPassword } from "firebase/auth";
 import { doc, getDoc } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 
-const Auth = () => {
+export default function Auth() {
   const navigate = useNavigate();
   const { toast } = useToast();
 
-  // Login form
+  // --- Login form ---
   const [loginId, setLoginId] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
 
-  // Forgot flow
+  // --- Forgot password (OTP) ---
   const [showReset, setShowReset] = useState(false);
   const [resetLoginId, setResetLoginId] = useState("");
   const [otpSent, setOtpSent] = useState(false);
@@ -32,9 +32,13 @@ const Auth = () => {
   const [confirm, setConfirm] = useState("");
   const [busyReset, setBusyReset] = useState(false);
 
+  const sendPasswordOtp = httpsCallable(functions, "sendPasswordOtp");
+  const verifyPasswordOtp = httpsCallable(functions, "verifyPasswordOtp");
+
   const handlePasswordLogin = async () => {
     setBusy(true);
     try {
+      // map loginId -> { email, uid }
       const lookupSnap = await getDoc(doc(db, "loginLookup", loginId));
       if (!lookupSnap.exists()) {
         toast({ variant: "destructive", title: "No account", description: `No user found for ${loginId}.` });
@@ -42,6 +46,7 @@ const Auth = () => {
         return;
       }
       const { email } = lookupSnap.data() as { email: string; uid: string };
+
       await signInWithEmailAndPassword(auth, email, password);
 
       const uid = auth.currentUser?.uid;
@@ -60,17 +65,18 @@ const Auth = () => {
       else navigate("/dashboard/student");
     } catch (err: any) {
       console.error("[login] failed", err);
-      toast({ variant: "destructive", title: "Login failed", description: err?.message || "Check your Login ID and password." });
+      toast({
+        variant: "destructive",
+        title: "Login failed",
+        description: err?.message || "Check your Login ID and password.",
+      });
     } finally {
       setBusy(false);
     }
   };
 
-  // ----- Forgot password (OTP) -----
-  const sendPasswordOtp = httpsCallable(functions, "sendPasswordOtp");
-  const verifyPasswordOtp = httpsCallable(functions, "verifyPasswordOtp");
-
-  const startForgot = () => {
+  // --- Forgot password helpers ---
+  const openForgot = () => {
     setShowReset(true);
     setResetLoginId(loginId || "");
     setOtpSent(false);
@@ -137,7 +143,9 @@ const Auth = () => {
         <CardHeader className="text-center">
           <CardTitle>Log In</CardTitle>
         </CardHeader>
+
         <CardContent className="space-y-3">
+          {/* LOGIN FORM */}
           <div>
             <Label>Login ID</Label>
             <Input
@@ -146,8 +154,19 @@ const Auth = () => {
               placeholder="e.g., 126179012 or F3210 or A0001"
             />
           </div>
+
           <div>
-            <Label>Password</Label>
+            <div className="flex items-center justify-between">
+              <Label>Password</Label>
+              {/* 👇 This is the visible link */}
+              <button
+                type="button"
+                onClick={openForgot}
+                className="text-sm underline text-primary hover:opacity-80"
+              >
+                Forgot password?
+              </button>
+            </div>
             <Input
               type="password"
               value={password}
@@ -155,18 +174,18 @@ const Auth = () => {
             />
           </div>
 
-          <div className="flex items-center justify-between">
-            <Button className="w-[48%]" onClick={handlePasswordLogin} disabled={busy}>
-              {busy ? "Logging in…" : "Log In"}
-            </Button>
-            <button className="underline text-sm" onClick={startForgot}>Forgot password?</button>
-          </div>
+          <Button className="w-full" onClick={handlePasswordLogin} disabled={busy}>
+            {busy ? "Logging in…" : "Log In"}
+          </Button>
 
           <div className="text-sm text-center">
             Don’t have an account?{" "}
-            <button className="underline" onClick={() => navigate("/signup")}>Sign up</button>
+            <button className="underline" onClick={() => navigate("/signup")}>
+              Sign up
+            </button>
           </div>
 
+          {/* RESET PANEL */}
           {showReset && (
             <div className="mt-6 border rounded p-3 space-y-3">
               <h3 className="font-medium">Reset password</h3>
@@ -190,7 +209,9 @@ const Auth = () => {
                 </>
               ) : (
                 <>
-                  <p className="text-sm">OTP sent to <strong>{emailMasked}</strong></p>
+                  <p className="text-sm">
+                    OTP sent to <strong>{emailMasked}</strong>
+                  </p>
                   <div className="grid grid-cols-2 gap-3">
                     <div>
                       <Label>Enter OTP</Label>
@@ -224,7 +245,9 @@ const Auth = () => {
                     <Button onClick={handleResetPassword} disabled={busyReset || !sessionId}>
                       {busyReset ? "Updating…" : "Reset password"}
                     </Button>
-                    <button className="text-sm underline" onClick={() => setShowReset(false)}>Cancel</button>
+                    <button className="text-sm underline" onClick={() => setShowReset(false)}>
+                      Cancel
+                    </button>
                   </div>
                   <p className="text-xs text-muted-foreground">Code expires in 10 minutes.</p>
                 </>
@@ -235,6 +258,4 @@ const Auth = () => {
       </Card>
     </div>
   );
-};
-
-export default Auth;
+}
