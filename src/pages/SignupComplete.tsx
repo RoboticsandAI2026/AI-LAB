@@ -23,6 +23,7 @@ import { doc, getDoc, serverTimestamp, setDoc } from "firebase/firestore";
 type Role = "STUDENT" | "FACULTY";
 type Phase = "auth" | "form" | "done";
 
+// Admins should not use this path (they are pre-seeded password users)
 const ADMIN_EMAILS = new Set<string>([
   "venkatesh@eee.sastra.edu",
   "126179012@sastra.ac.in",
@@ -52,17 +53,18 @@ export default function SignupComplete() {
     if (!email) return "";
     const local = email.split("@")[0] || "";
     if (role === "STUDENT") {
-      return /^\d+$/.test(local) ? local : ""; // students must have numeric local-part
+      return /^\d+$/.test(local) ? local : ""; // e.g., 126179012@sastra.ac.in -> 126179012
     }
+    // FACULTY: F + last 4 digits of phone
     const digits = (phone || "").replace(/\D/g, "");
     return digits.length >= 4 ? `F${digits.slice(-4)}` : "";
   }, [email, role, phone]);
 
-  // Step 1: Google OAuth (popup) with your own OAuth Client
+  // Step 1: Google OAuth (popup)
   const handleGoogleSignupStart = async () => {
     try {
       const provider = new GoogleAuthProvider();
-      // hd is a hint only; we still enforce via email check
+      // hd hint; we still enforce email domain after sign-in
       provider.setCustomParameters({ hd: "sastra.ac.in", prompt: "select_account" });
 
       const result = await signInWithPopup(auth, provider);
@@ -70,7 +72,6 @@ export default function SignupComplete() {
       const mail = (u.email || "").toLowerCase();
 
       if (!/@sastra\.ac\.in$/.test(mail)) {
-        // Not allowed — clean up immediately
         try { await deleteUser(u); } catch {}
         try { await signOut(auth); } catch {}
         toast({
@@ -101,13 +102,13 @@ export default function SignupComplete() {
       let hint = "";
       switch (err?.code) {
         case "auth/operation-not-allowed":
-          hint = "Enable Google provider in Firebase Authentication.";
+          hint = "Enable Google in Firebase Auth & set your OAuth client ID/secret.";
           break;
         case "auth/unauthorized-domain":
-          hint = "Add your site domain in Firebase Auth → Authorized domains, and add Origins in Google Cloud.";
+          hint = "Add your site to Firebase Auth Authorized domains & JS origins in Google Cloud.";
           break;
         case "auth/invalid-api-key":
-          hint = "Check firebaseConfig.ts matches the Firebase project using your OAuth client.";
+          hint = "Check firebaseConfig.ts points to the same Firebase project you configured.";
           break;
         case "auth/popup-blocked":
           hint = "Allow popups or try another browser.";
@@ -120,7 +121,7 @@ export default function SignupComplete() {
     }
   };
 
-  // Step 2: Save details, generate LoginID, add password sign-in to this Google account
+  // Step 2: Save details, generate LoginID, link password to Google account
   const handleFinishSignup = async () => {
     try {
       if (!gUser || !email) {
@@ -133,13 +134,21 @@ export default function SignupComplete() {
       if (role === "STUDENT") {
         const local = email.split("@")[0] || "";
         if (!/^\d+$/.test(local)) {
-          toast({ variant: "destructive", title: "Invalid student email", description: "Expected like 126179012@sastra.ac.in" });
+          toast({
+            variant: "destructive",
+            title: "Invalid student email",
+            description: "Expected like 126179012@sastra.ac.in",
+          });
           return;
         }
       } else {
         const digits = phone.replace(/\D/g, "");
         if (digits.length < 4) {
-          toast({ variant: "destructive", title: "Phone required", description: "Faculty must enter a valid phone (for Login ID)." });
+          toast({
+            variant: "destructive",
+            title: "Phone required",
+            description: "Faculty must enter a valid phone (for Login ID).",
+          });
           return;
         }
       }
@@ -168,7 +177,7 @@ export default function SignupComplete() {
         return;
       }
 
-      // Link Email/Password to this Google user, so they can use Login page
+      // Link Email/Password to this Google user (so they can use Login page)
       const cred = EmailAuthProvider.credential(email, password);
       await linkWithCredential(gUser, cred);
 
@@ -214,7 +223,9 @@ export default function SignupComplete() {
               <CardContent className="text-center space-y-4">
                 <p><strong>Email:</strong> {email}</p>
                 <p><strong>Login ID:</strong> {loginId}</p>
-                <Button className="w-full" onClick={() => navigate("/auth")}>Go to Login</Button>
+                <Button className="w-full" onClick={() => navigate("/auth")}>
+                  Go to Login
+                </Button>
               </CardContent>
             </Card>
           </div>
@@ -248,11 +259,23 @@ export default function SignupComplete() {
                     <Label>Role</Label>
                     <div className="flex items-center gap-4 h-10">
                       <label className="flex items-center gap-2 text-sm">
-                        <input type="radio" name="role" value="STUDENT" checked={role === "STUDENT"} onChange={() => setRole("STUDENT")} />
+                        <input
+                          type="radio"
+                          name="role"
+                          value="STUDENT"
+                          checked={role === "STUDENT"}
+                          onChange={() => setRole("STUDENT")}
+                        />
                         Student
                       </label>
                       <label className="flex items-center gap-2 text-sm">
-                        <input type="radio" name="role" value="FACULTY" checked={role === "FACULTY"} onChange={() => setRole("FACULTY")} />
+                        <input
+                          type="radio"
+                          name="role"
+                          value="FACULTY"
+                          checked={role === "FACULTY"}
+                          onChange={() => setRole("FACULTY")}
+                        />
                         Faculty
                       </label>
                     </div>
@@ -262,7 +285,11 @@ export default function SignupComplete() {
                 {role === "FACULTY" && (
                   <div>
                     <Label>Phone (for Login ID generation)</Label>
-                    <Input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="10-digit phone number" />
+                    <Input
+                      value={phone}
+                      onChange={(e) => setPhone(e.target.value)}
+                      placeholder="10-digit phone number"
+                    />
                     <p className="text-xs text-muted-foreground mt-1">
                       Your Login ID will be <code>F</code> + last 4 digits of your phone.
                     </p>
@@ -273,18 +300,30 @@ export default function SignupComplete() {
                   <Label>Login ID (auto-generated)</Label>
                   <Input value={loginId} readOnly placeholder="Generated from email/phone" />
                   {role === "STUDENT" && !loginId && (
-                    <p className="text-xs text-destructive mt-1">Student email must look like <code>126179012@sastra.ac.in</code>.</p>
+                    <p className="text-xs text-destructive mt-1">
+                      Student email must look like <code>126179012@sastra.ac.in</code>.
+                    </p>
                   )}
                 </div>
 
                 <div className="grid grid-cols-2 gap-3">
                   <div>
                     <Label>Create Password</Label>
-                    <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Min 8 characters" />
+                    <Input
+                      type="password"
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      placeholder="Min 8 characters"
+                    />
                   </div>
                   <div>
                     <Label>Confirm Password</Label>
-                    <Input type="password" value={confirm} onChange={(e) => setConfirm(e.target.value)} placeholder="Re-enter password" />
+                    <Input
+                      type="password"
+                      value={confirm}
+                      onChange={(e) => setConfirm(e.target.value)}
+                      placeholder="Re-enter password"
+                    />
                   </div>
                 </div>
 
