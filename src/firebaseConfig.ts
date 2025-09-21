@@ -1,10 +1,11 @@
 // src/firebaseConfig.ts
-// Initializes Firebase for the app and exports named instances: `app`, `auth`, and `db`.
+// Initializes Firebase for the app and exports: app, auth, db, functions.
 // Works with your hard-coded config AND supports Vite env vars if you add them later.
 
 import { initializeApp, getApps } from "firebase/app";
 import { getAuth } from "firebase/auth";
 import { getFirestore, connectFirestoreEmulator } from "firebase/firestore";
+import { getFunctions, connectFunctionsEmulator } from "firebase/functions";
 import { getAnalytics, isSupported } from "firebase/analytics";
 
 // Prefer Vite env vars if present; fall back to your current hard-coded values.
@@ -25,22 +26,31 @@ export const app = getApps().length ? getApps()[0] : initializeApp(firebaseConfi
 export const auth = getAuth(app);
 export const db = getFirestore(app);
 
-// Optional: connect Firestore emulator for local dev if you set these env vars
-// .env.local:
-//   VITE_USE_FIRESTORE_EMULATOR=true
-//   VITE_FIRESTORE_EMULATOR_HOST=127.0.0.1
-//   VITE_FIRESTORE_EMULATOR_PORT=8080
+// Cloud Functions (region must match your deploy; we use us-central1)
+export const functions = getFunctions(app, "us-central1");
+
+// ----- Optional: local emulator support -----
+// Firestore emulator
 try {
-  const useEmu = import.meta?.env?.VITE_USE_FIRESTORE_EMULATOR === "true";
-  if (useEmu) {
+  const useFsEmu = import.meta?.env?.VITE_USE_FIRESTORE_EMULATOR === "true";
+  if (useFsEmu) {
     const host = import.meta.env.VITE_FIRESTORE_EMULATOR_HOST || "127.0.0.1";
     const port = Number(import.meta.env.VITE_FIRESTORE_EMULATOR_PORT || 8080);
     connectFirestoreEmulator(db, host, port);
-    console.info(`[firestore] connected to emulator at ${host}:${port}`);
+    console.info(`[firestore] emulator: ${host}:${port}`);
   }
-} catch {
-  // ignore if import.meta.env is not available
-}
+} catch { /* ignore */ }
+
+// Functions emulator
+try {
+  const useFnEmu = import.meta?.env?.VITE_USE_FUNCTIONS_EMULATOR === "true";
+  if (useFnEmu) {
+    const host = import.meta.env.VITE_FUNCTIONS_EMULATOR_HOST || "127.0.0.1";
+    const port = Number(import.meta.env.VITE_FUNCTIONS_EMULATOR_PORT || 5001);
+    connectFunctionsEmulator(functions, host, port);
+    console.info(`[functions] emulator: ${host}:${port}`);
+  }
+} catch { /* ignore */ }
 
 // Optional Analytics (only works on https or localhost)
 isSupported()
