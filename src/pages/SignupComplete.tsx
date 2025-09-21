@@ -9,7 +9,7 @@ import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
 import { CheckCircle, Shield } from "lucide-react";
 
-// 🔥 Firebase
+// Firebase
 import { auth, db } from "../firebaseConfig";
 import {
   GoogleAuthProvider,
@@ -19,14 +19,12 @@ import {
 } from "firebase/auth";
 import { doc, getDoc, serverTimestamp, setDoc } from "firebase/firestore";
 
-// ─────────────────────────────────────────────────────────────
-// Hard-coded Admin Accounts (loginId → { email, name })
+// Pre-seeded Admin Accounts (loginId → { email, name })
 const ADMIN_ACCOUNTS: Record<string, { email: string; name: string }> = {
   A0001: { email: "venkatesh@eee.sastra.edu", name: "T. Venkatesh" },
   A0002: { email: "126179012@sastra.ac.in", name: "Karthikeya" },
   A0003: { email: "126179030@sastra.ac.in", name: "Vaishnavi" },
 };
-// ─────────────────────────────────────────────────────────────
 
 type Role = "STUDENT" | "FACULTY" | "ADMIN";
 
@@ -34,22 +32,16 @@ const SignupComplete = () => {
   const navigate = useNavigate();
   const { toast } = useToast();
 
-  // Form fields
   const [name, setName] = useState("");
   const [loginId, setLoginId] = useState("");
   const [role, setRole] = useState<Role>("STUDENT");
 
-  // UI state
   const [creating, setCreating] = useState(false);
   const [done, setDone] = useState(false);
 
-  // If the loginId matches an admin, we’ll force ADMIN path
   const adminPreset = useMemo(() => ADMIN_ACCOUNTS[loginId] || null, [loginId]);
   const isAdminLoginId = !!adminPreset;
 
-  // ─────────────────────────────────────────────────────────────
-  // Google Signup (allowed only for @sastra.ac.in) for STUDENT/FACULTY
-  // ─────────────────────────────────────────────────────────────
   const handleGoogleSignup = async () => {
     try {
       if (!loginId.trim()) {
@@ -64,7 +56,7 @@ const SignupComplete = () => {
         toast({
           title: "Admins are pre-created",
           description:
-            "Admin accounts are seeded by IT. Please use the Login page with your admin credentials.",
+            "Admin accounts are seeded by IT. Please go to the Login page and use your admin credentials.",
         });
         return;
       }
@@ -72,7 +64,6 @@ const SignupComplete = () => {
       setCreating(true);
 
       const provider = new GoogleAuthProvider();
-      // Advisory hint so Google shows the right account first
       provider.setCustomParameters({ hd: "sastra.ac.in", prompt: "select_account" });
 
       const result = await signInWithPopup(auth, provider);
@@ -80,15 +71,9 @@ const SignupComplete = () => {
       const email = (gUser.email || "").toLowerCase();
       const displayName = gUser.displayName || name || "";
 
-      // Client-side domain check (server-side is enforced via a blocking function)
-      const allowed = /@sastra\.ac\.in$/.test(email);
-      if (!allowed) {
-        try {
-          await deleteUser(gUser);
-        } catch {}
-        try {
-          await signOut(auth);
-        } catch {}
+      if (!/@sastra\.ac\.in$/.test(email)) {
+        try { await deleteUser(gUser); } catch {}
+        try { await signOut(auth); } catch {}
         toast({
           title: "Only @sastra.ac.in allowed",
           description: "Please sign up using your official SASTRA email.",
@@ -98,7 +83,7 @@ const SignupComplete = () => {
         return;
       }
 
-      // 1) Ensure loginId is unique via loginLookup/{loginId}
+      // Ensure loginId uniqueness via loginLookup/{loginId}
       const lookupRef = doc(db, "loginLookup", loginId);
       const lookupSnap = await getDoc(lookupRef);
       if (lookupSnap.exists()) {
@@ -112,13 +97,12 @@ const SignupComplete = () => {
         return;
       }
 
-      // 2) Build profile fields
       const uid = gUser.uid;
       const accountName = displayName || name;
       const accountEmail = email;
       const accountRole: Role = role; // STUDENT or FACULTY
 
-      // 3) Write profile in Firestore: users/{uid}
+      // Create profile at users/{uid}
       await setDoc(
         doc(db, "users", uid),
         {
@@ -132,10 +116,10 @@ const SignupComplete = () => {
         { merge: true }
       );
 
-      // 4) Write login lookup map: loginLookup/{loginId} -> { email, uid }
+      // Map loginId -> {email, uid}
       await setDoc(lookupRef, { email: accountEmail, uid });
 
-      // 5) Persist to local storage
+      // Persist locally
       localStorage.setItem("loginId", loginId);
       localStorage.setItem("role", accountRole);
       localStorage.setItem("name", accountName);
@@ -165,12 +149,12 @@ const SignupComplete = () => {
           <div className="max-w-md mx-auto">
             <Card>
               <CardHeader className="text-center">
-                <CheckCircle className="h-12 w-12 text-success mx-auto mb-3" />
-                <CardTitle className="text-2xl text-success">Account Created!</CardTitle>
+                <CheckCircle className="h-12 w-12 text-green-600 mx-auto mb-3" />
+                <CardTitle className="text-2xl text-green-700">Account Created!</CardTitle>
               </CardHeader>
               <CardContent className="text-center space-y-4">
                 <p><strong>Login ID:</strong> {loginId}</p>
-                <p><strong>Email:</strong> {adminPreset ? adminPreset.email : (localStorage.getItem("email") || "")}</p>
+                <p><strong>Email:</strong> {localStorage.getItem("email") || ""}</p>
                 <Button className="w-full" onClick={goLogin}>Go to Login</Button>
               </CardContent>
             </Card>
@@ -203,7 +187,7 @@ const SignupComplete = () => {
                         type="radio"
                         name="role"
                         value="STUDENT"
-                        checked={isAdminLoginId ? false : role === "STUDENT"}
+                        checked={!isAdminLoginId && role === "STUDENT"}
                         onChange={() => setRole("STUDENT")}
                         disabled={isAdminLoginId}
                       />
@@ -214,7 +198,7 @@ const SignupComplete = () => {
                         type="radio"
                         name="role"
                         value="FACULTY"
-                        checked={isAdminLoginId ? false : role === "FACULTY"}
+                        checked={!isAdminLoginId && role === "FACULTY"}
                         onChange={() => setRole("FACULTY")}
                         disabled={isAdminLoginId}
                       />
@@ -233,11 +217,10 @@ const SignupComplete = () => {
                 <Input
                   value={loginId}
                   onChange={(e) => setLoginId(e.target.value)}
-                  placeholder="S123456789 / F1234 / A0001"
+                  placeholder="S123456 / F1234 / A0001"
                 />
               </div>
 
-              {/* ADMIN path note */}
               {isAdminLoginId ? (
                 <div className="text-sm p-3 rounded border">
                   <p className="font-medium">Admin account detected (Login ID {loginId}).</p>
