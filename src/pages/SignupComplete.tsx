@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { Button } from "@/components/ui/button";
@@ -14,23 +14,22 @@ import {
   signInWithPopup,
   signOut,
   deleteUser,
-  updatePassword,
+  linkWithCredential,
+  EmailAuthProvider,
   User,
 } from "firebase/auth";
 import { doc, getDoc, serverTimestamp, setDoc } from "firebase/firestore";
 
-// Optional: hard-coded Admins — they must NOT sign up via this page
+type Role = "STUDENT" | "FACULTY";
+type Phase = "auth" | "form" | "done";
+
 const ADMIN_EMAILS = new Set<string>([
   "venkatesh@eee.sastra.edu",
   "126179012@sastra.ac.in",
   "126179030@sastra.ac.in",
 ]);
 
-type Role = "STUDENT" | "FACULTY";
-
-type Phase = "auth" | "form" | "done";
-
-const SignupComplete = () => {
+export default function SignupComplete() {
   const navigate = useNavigate();
   const { toast } = useToast();
 
@@ -48,31 +47,30 @@ const SignupComplete = () => {
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
 
-  // derive loginId
+  // derive Login ID
   const loginId = useMemo(() => {
     if (!email) return "";
     const local = email.split("@")[0] || "";
     if (role === "STUDENT") {
-      // must be numeric like 126179012
-      if (/^\d+$/.test(local)) return local;
-      return ""; // invalid student email format
+      return /^\d+$/.test(local) ? local : ""; // students must have numeric local-part
     }
-    // FACULTY: F + last 4 digits of phone
     const digits = (phone || "").replace(/\D/g, "");
-    if (digits.length >= 4) return `F${digits.slice(-4)}`;
-    return "";
+    return digits.length >= 4 ? `F${digits.slice(-4)}` : "";
   }, [email, role, phone]);
 
-  // STEP 1: Google auth (only sastra.ac.in)
+  // Step 1: Google OAuth (popup) with your own OAuth Client
   const handleGoogleSignupStart = async () => {
     try {
       const provider = new GoogleAuthProvider();
+      // hd is a hint only; we still enforce via email check
       provider.setCustomParameters({ hd: "sastra.ac.in", prompt: "select_account" });
+
       const result = await signInWithPopup(auth, provider);
       const u = result.user;
       const mail = (u.email || "").toLowerCase();
 
       if (!/@sastra\.ac\.in$/.test(mail)) {
+        // Not allowed — clean up immediately
         try { await deleteUser(u); } catch {}
         try { await signOut(auth); } catch {}
         toast({
@@ -84,7 +82,6 @@ const SignupComplete = () => {
       }
 
       if (ADMIN_EMAILS.has(mail)) {
-        // keep admins as password users (seeded), not through this path
         await signOut(auth);
         toast({
           title: "Admins cannot sign up here",
@@ -100,17 +97,30 @@ const SignupComplete = () => {
       setName(u.displayName || "");
       setPhase("form");
     } catch (err: any) {
-      console.error("[google signup] start failed", err);
-      toast({
-        title: "Google signup failed",
-        description: err?.message || "Something went wrong.",
-        variant: "destructive",
-      });
+      console.error("[Google OAuth] code:", err?.code, "message:", err?.message);
+      let hint = "";
+      switch (err?.code) {
+        case "auth/operation-not-allowed":
+          hint = "Enable Google provider in Firebase Authentication.";
+          break;
+        case "auth/unauthorized-domain":
+          hint = "Add your site domain in Firebase Auth → Authorized domains, and add Origins in Google Cloud.";
+          break;
+        case "auth/invalid-api-key":
+          hint = "Check firebaseConfig.ts matches the Firebase project using your OAuth client.";
+          break;
+        case "auth/popup-blocked":
+          hint = "Allow popups or try another browser.";
+          break;
+        default:
+          hint = "Check Console logs for details.";
+      }
+      toast({ title: "Google sign-in failed", description: hint, variant: "destructive" });
       try { await signOut(auth); } catch {}
     }
   };
 
-  // STEP 2: Submit details (generate loginId, set password, save profile)
+  // Step 2: Save details, generate LoginID, add password sign-in to this Google account
   const handleFinishSignup = async () => {
     try {
       if (!gUser || !email) {
@@ -118,33 +128,26 @@ const SignupComplete = () => {
         setPhase("auth");
         return;
       }
-      // Validate role and derived loginId
+
+      // Validate fields
       if (role === "STUDENT") {
         const local = email.split("@")[0] || "";
         if (!/^\d+$/.test(local)) {
-          toast({
-            variant: "destructive",
-            title: "Invalid student email",
-            description: "Student email must look like 126179012@sastra.ac.in",
-          });
+          toast({ variant: "destructive", title: "Invalid student email", description: "Expected like 126179012@sastra.ac.in" });
           return;
         }
-        if (!loginId) {
-          toast({ variant: "destructive", title: "Login ID error", description: "Could not derive Login ID." });
-          return;
-        }
-      } else if (role === "FACULTY") {
+      } else {
         const digits = phone.replace(/\D/g, "");
         if (digits.length < 4) {
-          toast({
-            variant: "destructive",
-            title: "Phone required",
-            description: "Faculty must enter a valid phone number (to derive Login ID).",
-          });
+          toast({ variant: "destructive", title: "Phone required", description: "Faculty must enter a valid phone (for Login ID)." });
           return;
         }
       }
 
+      if (!loginId) {
+        toast({ variant: "destructive", title: "Login ID error", description: "Could not derive Login ID." });
+        return;
+      }
       if (password.length < 8) {
         toast({ variant: "destructive", title: "Weak password", description: "Minimum 8 characters." });
         return;
@@ -156,24 +159,20 @@ const SignupComplete = () => {
 
       setCreating(true);
 
-      // Ensure loginId is unique
+      // Ensure loginId uniqueness
       const lookupRef = doc(db, "loginLookup", loginId);
       const lookupSnap = await getDoc(lookupRef);
       if (lookupSnap.exists()) {
-        toast({
-          variant: "destructive",
-          title: "Login ID in use",
-          description: `The Login ID "${loginId}" is already taken.`,
-        });
+        toast({ variant: "destructive", title: "Login ID in use", description: `"${loginId}" is already taken.` });
         setCreating(false);
         return;
       }
 
-      // IMPORTANT: add password to this Google account so the user can log in later via Login page
-      // Google sign-in was "recent", so updatePassword is allowed
-      await updatePassword(gUser, password);
+      // Link Email/Password to this Google user, so they can use Login page
+      const cred = EmailAuthProvider.credential(email, password);
+      await linkWithCredential(gUser, cred);
 
-      // Profile
+      // Write profile & login mapping
       const uid = gUser.uid;
       const profile = {
         uid,
@@ -184,37 +183,20 @@ const SignupComplete = () => {
         phone: role === "FACULTY" ? phone : "",
         createdAt: serverTimestamp(),
       };
-
       await setDoc(doc(db, "users", uid), profile, { merge: true });
       await setDoc(lookupRef, { email, uid });
 
-      // Clear auth (optional) and show success
+      // Sign out after creation (optional)
       try { await signOut(auth); } catch {}
-      localStorage.removeItem("name");
-      localStorage.removeItem("email");
-      localStorage.removeItem("loginId");
-      localStorage.removeItem("role");
 
       setPhase("done");
     } catch (err: any) {
       console.error("[signup finish] failed", err);
-      const msg = err?.message || "Something went wrong.";
-      // If password update failed due to requires-recent-login, ask them to click Google again
-      if (msg.includes("requires-recent-login")) {
-        toast({
-          title: "Session expired",
-          description: "Please click 'Continue with Google' again to re-authenticate.",
-          variant: "destructive",
-        });
-        setPhase("auth");
-      } else {
-        toast({
-          title: "Could not complete signup",
-          description: msg,
-          variant: "destructive",
-        });
+      let msg = err?.message || "Something went wrong.";
+      if (err?.code === "auth/credential-already-in-use") {
+        msg = "This email already has a password account. Try logging in, then link Google in account settings.";
       }
-    } finally {
+      toast({ title: "Could not complete signup", description: msg, variant: "destructive" });
       setCreating(false);
     }
   };
@@ -232,9 +214,7 @@ const SignupComplete = () => {
               <CardContent className="text-center space-y-4">
                 <p><strong>Email:</strong> {email}</p>
                 <p><strong>Login ID:</strong> {loginId}</p>
-                <Button className="w-full" onClick={() => navigate("/auth")}>
-                  Go to Login
-                </Button>
+                <Button className="w-full" onClick={() => navigate("/auth")}>Go to Login</Button>
               </CardContent>
             </Card>
           </div>
@@ -268,23 +248,11 @@ const SignupComplete = () => {
                     <Label>Role</Label>
                     <div className="flex items-center gap-4 h-10">
                       <label className="flex items-center gap-2 text-sm">
-                        <input
-                          type="radio"
-                          name="role"
-                          value="STUDENT"
-                          checked={role === "STUDENT"}
-                          onChange={() => setRole("STUDENT")}
-                        />
+                        <input type="radio" name="role" value="STUDENT" checked={role === "STUDENT"} onChange={() => setRole("STUDENT")} />
                         Student
                       </label>
                       <label className="flex items-center gap-2 text-sm">
-                        <input
-                          type="radio"
-                          name="role"
-                          value="FACULTY"
-                          checked={role === "FACULTY"}
-                          onChange={() => setRole("FACULTY")}
-                        />
+                        <input type="radio" name="role" value="FACULTY" checked={role === "FACULTY"} onChange={() => setRole("FACULTY")} />
                         Faculty
                       </label>
                     </div>
@@ -294,11 +262,7 @@ const SignupComplete = () => {
                 {role === "FACULTY" && (
                   <div>
                     <Label>Phone (for Login ID generation)</Label>
-                    <Input
-                      value={phone}
-                      onChange={(e) => setPhone(e.target.value)}
-                      placeholder="10-digit phone number"
-                    />
+                    <Input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="10-digit phone number" />
                     <p className="text-xs text-muted-foreground mt-1">
                       Your Login ID will be <code>F</code> + last 4 digits of your phone.
                     </p>
@@ -307,32 +271,20 @@ const SignupComplete = () => {
 
                 <div>
                   <Label>Login ID (auto-generated)</Label>
-                  <Input value={loginId} readOnly placeholder="Will be generated from email/phone" />
+                  <Input value={loginId} readOnly placeholder="Generated from email/phone" />
                   {role === "STUDENT" && !loginId && (
-                    <p className="text-xs text-destructive mt-1">
-                      Student email must look like <code>126179012@sastra.ac.in</code>.
-                    </p>
+                    <p className="text-xs text-destructive mt-1">Student email must look like <code>126179012@sastra.ac.in</code>.</p>
                   )}
                 </div>
 
                 <div className="grid grid-cols-2 gap-3">
                   <div>
                     <Label>Create Password</Label>
-                    <Input
-                      type="password"
-                      value={password}
-                      onChange={(e) => setPassword(e.target.value)}
-                      placeholder="Min 8 characters"
-                    />
+                    <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Min 8 characters" />
                   </div>
                   <div>
                     <Label>Confirm Password</Label>
-                    <Input
-                      type="password"
-                      value={confirm}
-                      onChange={(e) => setConfirm(e.target.value)}
-                      placeholder="Re-enter password"
-                    />
+                    <Input type="password" value={confirm} onChange={(e) => setConfirm(e.target.value)} placeholder="Re-enter password" />
                   </div>
                 </div>
 
@@ -374,9 +326,7 @@ const SignupComplete = () => {
 
               <p className="text-sm text-muted-foreground text-center mt-4">
                 Already have an account?{" "}
-                <button className="underline" onClick={() => navigate("/auth")}>
-                  Log in
-                </button>
+                <button className="underline" onClick={() => navigate("/auth")}>Log in</button>
               </p>
             </CardContent>
           </Card>
@@ -384,6 +334,4 @@ const SignupComplete = () => {
       </div>
     </div>
   );
-};
-
-export default SignupComplete;
+}
