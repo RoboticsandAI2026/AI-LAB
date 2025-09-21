@@ -66,9 +66,9 @@ const Auth = () => {
     }
   };
 
-  // ---- Forgot password (OTP) ----
-  const callSendOtp = httpsCallable(functions, "sendPasswordOtp");
-  const callVerifyOtp = httpsCallable(functions, "verifyPasswordOtp");
+  // ----- Forgot password (OTP) -----
+  const sendPasswordOtp = httpsCallable(functions, "sendPasswordOtp");
+  const verifyPasswordOtp = httpsCallable(functions, "verifyPasswordOtp");
 
   const startForgot = () => {
     setShowReset(true);
@@ -88,7 +88,7 @@ const Auth = () => {
     }
     setBusyReset(true);
     try {
-      const res: any = await callSendOtp({ loginId: resetLoginId.trim() });
+      const res: any = await sendPasswordOtp({ loginId: resetLoginId.trim() });
       setSessionId(res.data.sessionId);
       setEmailMasked(res.data.emailMasked);
       setOtpSent(true);
@@ -116,7 +116,7 @@ const Auth = () => {
     }
     setBusyReset(true);
     try {
-      const res: any = await callVerifyOtp({ sessionId, otp, newPassword: newPass });
+      const res: any = await verifyPasswordOtp({ sessionId, otp, newPassword: newPass });
       if (res?.data?.ok) {
         toast({ title: "Password updated", description: "You can now log in with your new password." });
         setShowReset(false);
@@ -167,7 +167,6 @@ const Auth = () => {
             <button className="underline" onClick={() => navigate("/signup")}>Sign up</button>
           </div>
 
-          {/* -------- Forgot password panel -------- */}
           {showReset && (
             <div className="mt-6 border rounded p-3 space-y-3">
               <h3 className="font-medium">Reset password</h3>
@@ -197,7 +196,7 @@ const Auth = () => {
                       <Label>Enter OTP</Label>
                       <Input
                         value={otp}
-                        onChange={(e) => setOtp(e.target.value.replace(/\D/g, "").slice(0,6))}
+                        onChange={(e) => setOtp(e.target.value.replace(/\D/g, "").slice(0, 6))}
                         placeholder="6-digit code"
                         inputMode="numeric"
                       />
@@ -232,7 +231,6 @@ const Auth = () => {
               )}
             </div>
           )}
-          {/* -------- End forgot password panel -------- */}
         </CardContent>
       </Card>
     </div>
