@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
 
 import { Button } from "@/components/ui/button";
@@ -8,21 +8,14 @@ import { Label } from "@/components/ui/label";
 import { useToast } from "@/components/ui/use-toast";
 
 import { auth, db, functions } from "@/firebaseConfig";
-import { signInWithEmailAndPassword } from "firebase/auth";
+import { signInWithEmailAndPassword, onAuthStateChanged } from "firebase/auth";
 import { doc, getDoc } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 
 /**
- * Backend helper (Cloud Function you should add if not present yet):
- *
- * export const resolveLoginEmail = functions.https.onCall(async (data) => {
- *   const loginId = (data?.loginId || "").trim();
- *   if (!loginId) throw new functions.https.HttpsError("invalid-argument", "loginId required");
- *   const snap = await admin.firestore().collection("users").where("loginId","==",loginId).limit(1).get();
- *   if (snap.empty) throw new functions.https.HttpsError("not-found", "User not found");
- *   const u = snap.docs[0].data();
- *   return { email: u.email };
- * });
+ * Optional backend helper (callable):
+ *   resolveLoginEmail(loginId) -> { email }
+ * If you don’t have it yet, add a small Cloud Function that maps loginId -> email from Firestore.
  */
 
 export default function Auth() {
@@ -33,39 +26,45 @@ export default function Auth() {
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
 
+  // If already signed-in with a role in localStorage, bounce to their dashboard
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, async (user) => {
+      const role = localStorage.getItem("role");
+      if (user && role) {
+        if (role === "ADMIN") navigate("/dashboard/admin", { replace: true });
+        else if (role === "FACULTY") navigate("/dashboard/faculty", { replace: true });
+        else if (role === "STUDENT") navigate("/dashboard/student", { replace: true });
+      }
+    });
+    return () => unsub();
+  }, [navigate]);
+
   async function resolveEmailFromLoginId(id: string): Promise<string> {
-    // If user typed an email directly, accept it
+    // If it's already an email, just use it.
     if (id.includes("@")) return id;
 
-    // Else map Login ID -> email via callable
+    // Else call backend to map loginId -> email
     const fn = httpsCallable(functions, "resolveLoginEmail");
     const res: any = await fn({ loginId: id });
     const email = res?.data?.email;
-    if (!email) {
-      throw new Error("Account not found for the given Login ID");
-    }
+    if (!email) throw new Error("Account not found for the given Login ID");
     return email;
   }
 
   async function fetchAndSetRoleAndRedirect(uid: string) {
-    try {
-      const userDoc = await getDoc(doc(db, "users", uid));
-      const data = userDoc.data() as any;
-      const role = (data?.role || "").toUpperCase();
-      if (!role) {
-        toast({ title: "No role found for user", variant: "destructive" });
-        return;
-      }
-      localStorage.setItem("role", role);
-
-      // Redirect by role
-      if (role === "ADMIN") navigate("/dashboard/admin", { replace: true });
-      else if (role === "FACULTY") navigate("/dashboard/faculty", { replace: true });
-      else if (role === "STUDENT") navigate("/dashboard/student", { replace: true });
-      else navigate("/", { replace: true });
-    } catch (e: any) {
-      toast({ title: "Failed to load user profile", description: e.message, variant: "destructive" });
+    const snap = await getDoc(doc(db, "users", uid));
+    const data = snap.data() as any;
+    const role = (data?.role || "").toUpperCase();
+    if (!role) {
+      toast({ title: "No role found for user", variant: "destructive" });
+      return;
     }
+    localStorage.setItem("role", role);
+
+    if (role === "ADMIN") navigate("/dashboard/admin", { replace: true });
+    else if (role === "FACULTY") navigate("/dashboard/faculty", { replace: true });
+    else if (role === "STUDENT") navigate("/dashboard/student", { replace: true });
+    else navigate("/", { replace: true });
   }
 
   const handleLogin = async (e: React.FormEvent) => {
@@ -79,12 +78,14 @@ export default function Auth() {
       setBusy(true);
       const email = await resolveEmailFromLoginId(loginId.trim());
       const cred = await signInWithEmailAndPassword(auth, email, password);
-
       toast({ title: "Signed in successfully" });
       await fetchAndSetRoleAndRedirect(cred.user.uid);
     } catch (err: any) {
-      const message = err?.message || "Login failed";
-      toast({ title: "Login failed", description: message, variant: "destructive" });
+      toast({
+        title: "Login failed",
+        description: err?.message || "Please check your credentials",
+        variant: "destructive",
+      });
     } finally {
       setBusy(false);
     }
@@ -132,6 +133,14 @@ export default function Auth() {
             <Button type="submit" className="w-full" disabled={busy}>
               {busy ? "Signing in..." : "Sign In"}
             </Button>
+
+            {/* NEW: clear way to reach Sign Up */}
+            <div className="mt-4 text-center text-sm">
+              <span className="text-muted-foreground">New user? </span>
+              <Link to="/signup" className="text-primary hover:underline">
+                Create an account
+              </Link>
+            </div>
           </form>
         </CardContent>
       </Card>
