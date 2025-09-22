@@ -1,160 +1,196 @@
-import { setGlobalOptions } from "firebase-functions/v2";
-import { onCall, HttpsError } from "firebase-functions/v2/https";
-import * as functions from "firebase-functions"; // for functions.config()
-import { initializeApp } from "firebase-admin/app";
-import { getFirestore, FieldValue, Timestamp } from "firebase-admin/firestore";
-import { getAuth as getAdminAuth } from "firebase-admin/auth";
-import nodemailer from "nodemailer";
-import crypto from "crypto";
+import * as functions from "firebase-functions";
+import * as admin from "firebase-admin";
+import * as nodemailer from "nodemailer";
+import * as bcrypt from "bcryptjs";
+import * as jwt from "jsonwebtoken";
 
-// 👇 Keep region in sync with your client getFunctions(app, "<region>")
-setGlobalOptions({ region: "us-central1", maxInstances: 10 });
-initializeApp();
-
-const db = getFirestore();
-const adminAuth = getAdminAuth();
-
-// Runtime config (set via: firebase functions:config:set ...)
-const cfg = functions.config() as any;
-
-const SMTP_EMAIL  = cfg.smtp?.email;
-const SMTP_PASS   = cfg.smtp?.pass;
-const SMTP_HOST   = cfg.smtp?.host || "smtp.gmail.com";
-const SMTP_PORT   = Number(cfg.smtp?.port || 465);
-const SMTP_SECURE = (cfg.smtp?.secure ?? "true") !== "false";
-const MAIL_FROM   = cfg.mail?.from || "SASTRA AI Lab <no-reply@example.com>";
-const OTP_SALT    = cfg.otp?.salt || "CHANGE_ME_SALT";
-
-const transporter = nodemailer.createTransport({
-  host: SMTP_HOST,
-  port: SMTP_PORT,
-  secure: SMTP_SECURE,
-  auth: { user: SMTP_EMAIL, pass: SMTP_PASS },
-});
-
-const OTP_TTL_MS = 10 * 60 * 1000;      // 10 min for OTP
-const TICKET_TTL_MS = 10 * 60 * 1000;   // 10 min to set password after OTP
-const MAX_ATTEMPTS = 5;
-
-function newOtp(): string {
-  return crypto.randomInt(0, 1_000_000).toString().padStart(6, "0");
-}
-function hashOtp(otp: string): string {
-  return crypto.createHmac("sha256", OTP_SALT).update(otp).digest("hex");
-}
-function maskEmail(email: string): string {
-  const [n, d] = email.split("@"); if (!n || !d) return email;
-  const shown = n.length <= 2 ? n[0] : n.slice(0, 2);
-  return `${shown}${"*".repeat(Math.max(1, n.length - shown.length))}@${d}`;
+if (!admin.apps.length) {
+  admin.initializeApp();
 }
 
-/** STEP 1: sendPasswordOtp({ loginId }) -> { sessionId, emailMasked, ttlSeconds } */
-export const sendPasswordOtp = onCall(async (req) => {
-  const { loginId } = (req.data || {}) as { loginId?: string };
-  if (!loginId || typeof loginId !== "string") {
-    throw new HttpsError("invalid-argument", "loginId is required");
+const db = admin.firestore();
+
+// ---- ENV (set with firebase functions:config:set ... shown below) ----
+const MAIL_FROM = functions.config().mail?.from || "no-reply@example.com";
+const SMTP_HOST = functions.config().smtp?.host;
+const SMTP_PORT = Number(functions.config().smtp?.port || 587);
+const SMTP_USER = functions.config().smtp?.user;
+const SMTP_PASS = functions.config().smtp?.pass;
+
+// JWT secret for reset tokens
+const RESET_JWT_SECRET = functions.config().reset?.jwt_secret || "CHANGE_ME_DEV_ONLY";
+
+// 10 minutes for OTP, 15 minutes for reset token
+const OTP_TTL_MS = 10 * 60 * 1000;
+const TOKEN_TTL_MS = 15 * 60 * 1000;
+
+function transporter() {
+  if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS) {
+    throw new functions.https.HttpsError(
+      "failed-precondition",
+      "SMTP not configured. Set functions config."
+    );
+  }
+  return nodemailer.createTransport({
+    host: SMTP_HOST,
+    port: SMTP_PORT,
+    secure: SMTP_PORT === 465,
+    auth: { user: SMTP_USER, pass: SMTP_PASS },
+  });
+}
+
+async function getUserByLoginId(loginId: string) {
+  const snap = await db.collection("users").where("loginId", "==", loginId).limit(1).get();
+  if (snap.empty) return null;
+  const doc = snap.docs[0];
+  const data = doc.data();
+  return { uid: doc.id, ...data } as { uid: string; email: string; loginId: string; name?: string };
+}
+
+function generateOTP(): string {
+  return (Math.floor(100000 + Math.random() * 900000)).toString(); // 6-digit
+}
+
+export const requestPasswordResetOTP = functions.https.onCall(async (data, context) => {
+  const loginId = (data?.loginId || "").trim();
+  if (!loginId) {
+    throw new functions.https.HttpsError("invalid-argument", "loginId required");
   }
 
-  // loginId -> { email, uid }
-  const mapSnap = await db.doc(`loginLookup/${loginId}`).get();
-  if (!mapSnap.exists) throw new HttpsError("not-found", "No user found for this Login ID");
-  const { email, uid } = mapSnap.data() as { email: string; uid: string };
+  const user = await getUserByLoginId(loginId);
+  if (!user?.email) {
+    // Avoid user enumeration: respond success anyway, but do nothing.
+    return { success: true };
+  }
 
-  const otp = newOtp();
-  const codeHash = hashOtp(otp);
-  const sessionId = crypto.randomUUID();
-  const now = Date.now();
+  const otp = generateOTP();
+  const otpHash = await bcrypt.hash(otp, 10);
+  const expiresAt = Date.now() + OTP_TTL_MS;
 
-  await db.doc(`passwordOtps/${sessionId}`).set({
-    uid, email, codeHash,
+  await db.collection("password_resets").doc(loginId).set({
+    otpHash,
+    expiresAt,
     attempts: 0,
-    createdAt: Timestamp.fromMillis(now),
-    expiresAt: Timestamp.fromMillis(now + OTP_TTL_MS),
+    resetToken: null,
+    resetTokenExpiresAt: null,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
   });
 
-  await transporter.sendMail({
+  // send email
+  const t = transporter();
+  await t.sendMail({
     from: MAIL_FROM,
-    to: email,
-    subject: "Your OTP to reset your SASTRA AI Lab password",
+    to: user.email,
+    subject: "AI-LAB Password Reset OTP",
     text:
-`Hi,
-Use this One-Time Password to reset your password:
+`Hello${user.name ? " " + user.name : ""},
 
-OTP: ${otp}
+Your OTP for resetting the AI-LAB password is: ${otp}
 
-This code expires in 10 minutes.
-If you didn’t request this, you can ignore this email.
+This OTP will expire in 10 minutes. If you did not request this, you can ignore this email.
 
-— SASTRA AI Lab`,
+— AI-LAB`,
   });
 
-  return { sessionId, emailMasked: maskEmail(email), ttlSeconds: OTP_TTL_MS / 1000 };
+  return { success: true };
 });
 
-/** STEP 2: validatePasswordOtp({ sessionId, otp }) -> { ticketId } */
-export const validatePasswordOtp = onCall(async (req) => {
-  const { sessionId, otp } = (req.data || {}) as { sessionId?: string; otp?: string };
-  if (!sessionId || !otp) {
-    throw new HttpsError("invalid-argument", "sessionId and otp are required");
+export const verifyPasswordResetOTP = functions.https.onCall(async (data, context) => {
+  const loginId = (data?.loginId || "").trim();
+  const otp = (data?.otp || "").trim();
+
+  if (!loginId || !otp) {
+    throw new functions.https.HttpsError("invalid-argument", "loginId and otp required");
   }
 
-  const ref = db.doc(`passwordOtps/${sessionId}`);
-  const snap = await ref.get();
-  if (!snap.exists) throw new HttpsError("not-found", "Session not found or expired");
-
-  const data = snap.data() as any;
-
-  if (data.expiresAt?.toMillis?.() < Date.now()) {
-    await ref.delete();
-    throw new HttpsError("deadline-exceeded", "OTP expired. Please request a new one.");
-  }
-  if ((data.attempts ?? 0) >= MAX_ATTEMPTS) {
-    await ref.delete();
-    throw new HttpsError("resource-exhausted", "Too many attempts. Request a new OTP.");
-  }
-  const ok = hashOtp(otp) === data.codeHash;
-  if (!ok) {
-    await ref.update({ attempts: (data.attempts ?? 0) + 1, lastAttemptAt: FieldValue.serverTimestamp() });
-    throw new HttpsError("permission-denied", "Invalid OTP");
+  const docRef = db.collection("password_resets").doc(loginId);
+  const doc = await docRef.get();
+  if (!doc.exists) {
+    throw new functions.https.HttpsError("not-found", "OTP not found or expired");
   }
 
-  // Valid OTP → issue a one-time reset ticket and delete OTP session
-  const ticketId = crypto.randomUUID();
-  const now = Date.now();
-  await db.doc(`resetTickets/${ticketId}`).set({
-    uid: data.uid,
-    createdAt: Timestamp.fromMillis(now),
-    expiresAt: Timestamp.fromMillis(now + TICKET_TTL_MS),
-    used: false,
+  const r = doc.data() as any;
+  if (!r?.otpHash || !r?.expiresAt) {
+    throw new functions.https.HttpsError("not-found", "OTP not found or expired");
+  }
+
+  if (Date.now() > r.expiresAt) {
+    await docRef.delete();
+    throw new functions.https.HttpsError("deadline-exceeded", "OTP expired");
+  }
+
+  if (!(await bcrypt.compare(otp, r.otpHash))) {
+    const tries = (r.attempts || 0) + 1;
+    if (tries >= 5) {
+      await docRef.delete(); // lockout after 5 wrong attempts
+      throw new functions.https.HttpsError("permission-denied", "Too many attempts");
+    }
+    await docRef.update({ attempts: tries, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+    throw new functions.https.HttpsError("unauthenticated", "Incorrect OTP");
+  }
+
+  // Successful OTP → issue short-lived reset token
+  const resetToken = jwt.sign({ loginId }, RESET_JWT_SECRET, { expiresIn: Math.floor(TOKEN_TTL_MS / 1000) });
+  const resetTokenExpiresAt = Date.now() + TOKEN_TTL_MS;
+  await docRef.update({
+    resetToken,
+    resetTokenExpiresAt,
+    // OTP one-and-done: remove it
+    otpHash: admin.firestore.FieldValue.delete(),
+    expiresAt: admin.firestore.FieldValue.delete(),
+    attempts: admin.firestore.FieldValue.delete(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
   });
 
-  await ref.delete();
-  return { ticketId };
+  return { success: true, resetToken };
 });
 
-/** STEP 3: setPasswordWithTicket({ ticketId, newPassword }) -> { ok: true } */
-export const setPasswordWithTicket = onCall(async (req) => {
-  const { ticketId, newPassword } = (req.data || {}) as { ticketId?: string; newPassword?: string };
-  if (!ticketId || !newPassword) {
-    throw new HttpsError("invalid-argument", "ticketId and newPassword are required");
+export const setNewPassword = functions.https.onCall(async (data, context) => {
+  const loginId = (data?.loginId || "").trim();
+  const resetToken = (data?.resetToken || "").trim();
+  const newPassword = (data?.newPassword || "").trim();
+
+  if (!loginId || !resetToken || !newPassword) {
+    throw new functions.https.HttpsError("invalid-argument", "loginId, resetToken, newPassword required");
   }
   if (newPassword.length < 8) {
-    throw new HttpsError("invalid-argument", "Password must be at least 8 characters");
+    throw new functions.https.HttpsError("invalid-argument", "Password must be at least 8 characters");
   }
 
-  const tRef = db.doc(`resetTickets/${ticketId}`);
-  const tSnap = await tRef.get();
-  if (!tSnap.exists) throw new HttpsError("not-found", "Reset ticket not found");
-
-  const t = tSnap.data() as any;
-  if (t.used) throw new HttpsError("failed-precondition", "This reset ticket was already used.");
-  if (t.expiresAt?.toMillis?.() < Date.now()) {
-    await tRef.delete();
-    throw new HttpsError("deadline-exceeded", "Reset ticket expired. Start over.");
+  // verify token
+  let payload: any;
+  try {
+    payload = jwt.verify(resetToken, RESET_JWT_SECRET);
+  } catch {
+    throw new functions.https.HttpsError("unauthenticated", "Invalid or expired token");
+  }
+  if (payload?.loginId !== loginId) {
+    throw new functions.https.HttpsError("unauthenticated", "Token/login mismatch");
   }
 
-  await adminAuth.updateUser(t.uid as string, { password: newPassword });
-  await tRef.update({ used: true, usedAt: FieldValue.serverTimestamp() });
+  // ensure token is the latest
+  const docRef = db.collection("password_resets").doc(loginId);
+  const doc = await docRef.get();
+  if (!doc.exists) {
+    throw new functions.https.HttpsError("not-found", "Reset session expired");
+  }
+  const r = doc.data() as any;
+  if (r.resetToken !== resetToken || Date.now() > (r.resetTokenExpiresAt || 0)) {
+    await docRef.delete();
+    throw new functions.https.HttpsError("unauthenticated", "Reset token expired");
+  }
 
-  return { ok: true };
+  const user = await getUserByLoginId(loginId);
+  if (!user) {
+    await docRef.delete();
+    throw new functions.https.HttpsError("not-found", "User not found");
+  }
+
+  // Update password in Firebase Auth
+  await admin.auth().updateUser(user.uid, { password: newPassword });
+
+  // Cleanup reset doc
+  await docRef.delete();
+
+  return { success: true };
 });
