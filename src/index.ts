@@ -7,7 +7,7 @@ import { getAuth as getAdminAuth } from "firebase-admin/auth";
 import nodemailer from "nodemailer";
 import crypto from "crypto";
 
-// 💡 keep region in sync with your client: getFunctions(app, "us-central1")
+// 👇 Keep region in sync with your client getFunctions(app, "<region>")
 setGlobalOptions({ region: "us-central1", maxInstances: 10 });
 initializeApp();
 
@@ -32,7 +32,8 @@ const transporter = nodemailer.createTransport({
   auth: { user: SMTP_EMAIL, pass: SMTP_PASS },
 });
 
-const OTP_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const OTP_TTL_MS = 10 * 60 * 1000;      // 10 min for OTP
+const TICKET_TTL_MS = 10 * 60 * 1000;   // 10 min to set password after OTP
 const MAX_ATTEMPTS = 5;
 
 function newOtp(): string {
@@ -42,20 +43,19 @@ function hashOtp(otp: string): string {
   return crypto.createHmac("sha256", OTP_SALT).update(otp).digest("hex");
 }
 function maskEmail(email: string): string {
-  const [n, d] = email.split("@");
-  if (!n || !d) return email;
+  const [n, d] = email.split("@"); if (!n || !d) return email;
   const shown = n.length <= 2 ? n[0] : n.slice(0, 2);
   return `${shown}${"*".repeat(Math.max(1, n.length - shown.length))}@${d}`;
 }
 
-/** sendPasswordOtp({ loginId }) → { sessionId, emailMasked, ttlSeconds } */
+/** STEP 1: sendPasswordOtp({ loginId }) -> { sessionId, emailMasked, ttlSeconds } */
 export const sendPasswordOtp = onCall(async (req) => {
   const { loginId } = (req.data || {}) as { loginId?: string };
   if (!loginId || typeof loginId !== "string") {
     throw new HttpsError("invalid-argument", "loginId is required");
   }
 
-  // Map loginId -> { email, uid }
+  // loginId -> { email, uid }
   const mapSnap = await db.doc(`loginLookup/${loginId}`).get();
   if (!mapSnap.exists) throw new HttpsError("not-found", "No user found for this Login ID");
   const { email, uid } = mapSnap.data() as { email: string; uid: string };
@@ -66,9 +66,7 @@ export const sendPasswordOtp = onCall(async (req) => {
   const now = Date.now();
 
   await db.doc(`passwordOtps/${sessionId}`).set({
-    uid,
-    email,
-    codeHash,
+    uid, email, codeHash,
     attempts: 0,
     createdAt: Timestamp.fromMillis(now),
     expiresAt: Timestamp.fromMillis(now + OTP_TTL_MS),
@@ -93,16 +91,11 @@ If you didn’t request this, you can ignore this email.
   return { sessionId, emailMasked: maskEmail(email), ttlSeconds: OTP_TTL_MS / 1000 };
 });
 
-/** verifyPasswordOtp({ sessionId, otp, newPassword }) → { ok: true } */
-export const verifyPasswordOtp = onCall(async (req) => {
-  const { sessionId, otp, newPassword } =
-    (req.data || {}) as { sessionId?: string; otp?: string; newPassword?: string };
-
-  if (!sessionId || !otp || !newPassword) {
-    throw new HttpsError("invalid-argument", "sessionId, otp, newPassword are required");
-  }
-  if (newPassword.length < 8) {
-    throw new HttpsError("invalid-argument", "Password must be at least 8 characters");
+/** STEP 2: validatePasswordOtp({ sessionId, otp }) -> { ticketId } */
+export const validatePasswordOtp = onCall(async (req) => {
+  const { sessionId, otp } = (req.data || {}) as { sessionId?: string; otp?: string };
+  if (!sessionId || !otp) {
+    throw new HttpsError("invalid-argument", "sessionId and otp are required");
   }
 
   const ref = db.doc(`passwordOtps/${sessionId}`);
@@ -115,20 +108,53 @@ export const verifyPasswordOtp = onCall(async (req) => {
     await ref.delete();
     throw new HttpsError("deadline-exceeded", "OTP expired. Please request a new one.");
   }
-
   if ((data.attempts ?? 0) >= MAX_ATTEMPTS) {
     await ref.delete();
     throw new HttpsError("resource-exhausted", "Too many attempts. Request a new OTP.");
   }
-
   const ok = hashOtp(otp) === data.codeHash;
   if (!ok) {
     await ref.update({ attempts: (data.attempts ?? 0) + 1, lastAttemptAt: FieldValue.serverTimestamp() });
     throw new HttpsError("permission-denied", "Invalid OTP");
   }
 
-  await adminAuth.updateUser(data.uid as string, { password: newPassword });
+  // Valid OTP → issue a one-time reset ticket and delete OTP session
+  const ticketId = crypto.randomUUID();
+  const now = Date.now();
+  await db.doc(`resetTickets/${ticketId}`).set({
+    uid: data.uid,
+    createdAt: Timestamp.fromMillis(now),
+    expiresAt: Timestamp.fromMillis(now + TICKET_TTL_MS),
+    used: false,
+  });
+
   await ref.delete();
+  return { ticketId };
+});
+
+/** STEP 3: setPasswordWithTicket({ ticketId, newPassword }) -> { ok: true } */
+export const setPasswordWithTicket = onCall(async (req) => {
+  const { ticketId, newPassword } = (req.data || {}) as { ticketId?: string; newPassword?: string };
+  if (!ticketId || !newPassword) {
+    throw new HttpsError("invalid-argument", "ticketId and newPassword are required");
+  }
+  if (newPassword.length < 8) {
+    throw new HttpsError("invalid-argument", "Password must be at least 8 characters");
+  }
+
+  const tRef = db.doc(`resetTickets/${ticketId}`);
+  const tSnap = await tRef.get();
+  if (!tSnap.exists) throw new HttpsError("not-found", "Reset ticket not found");
+
+  const t = tSnap.data() as any;
+  if (t.used) throw new HttpsError("failed-precondition", "This reset ticket was already used.");
+  if (t.expiresAt?.toMillis?.() < Date.now()) {
+    await tRef.delete();
+    throw new HttpsError("deadline-exceeded", "Reset ticket expired. Start over.");
+  }
+
+  await adminAuth.updateUser(t.uid as string, { password: newPassword });
+  await tRef.update({ used: true, usedAt: FieldValue.serverTimestamp() });
 
   return { ok: true };
 });
