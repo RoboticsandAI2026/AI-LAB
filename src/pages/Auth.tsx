@@ -7,10 +7,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/components/ui/use-toast";
 
-import { auth, db, functions } from "@/firebaseConfig";
+import { auth, db } from "@/firebaseConfig";
 import { signInWithEmailAndPassword } from "firebase/auth";
 import { doc, getDoc } from "firebase/firestore";
-import { httpsCallable } from "firebase/functions";
 
 export default function Auth() {
   const navigate = useNavigate();
@@ -21,27 +20,23 @@ export default function Auth() {
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
 
-  // --- Forgot password (OTP) ---
-  const [showReset, setShowReset] = useState(false);
-  const [resetLoginId, setResetLoginId] = useState("");
-  const [otpSent, setOtpSent] = useState(false);
-  const [emailMasked, setEmailMasked] = useState("");
-  const [sessionId, setSessionId] = useState("");
-  const [otp, setOtp] = useState("");
-  const [newPass, setNewPass] = useState("");
-  const [confirm, setConfirm] = useState("");
-  const [busyReset, setBusyReset] = useState(false);
-
-  const sendPasswordOtp = httpsCallable(functions, "sendPasswordOtp");
-  const verifyPasswordOtp = httpsCallable(functions, "verifyPasswordOtp");
-
   const handlePasswordLogin = async () => {
+    const id = loginId.trim();
+    if (!id) {
+      toast({ variant: "destructive", title: "Login ID required", description: "Enter your Login ID to continue." });
+      return;
+    }
+    if (!password) {
+      toast({ variant: "destructive", title: "Password required", description: "Enter your password to continue." });
+      return;
+    }
+
     setBusy(true);
     try {
       // map loginId -> { email, uid }
-      const lookupSnap = await getDoc(doc(db, "loginLookup", loginId));
+      const lookupSnap = await getDoc(doc(db, "loginLookup", id));
       if (!lookupSnap.exists()) {
-        toast({ variant: "destructive", title: "No account", description: `No user found for ${loginId}.` });
+        toast({ variant: "destructive", title: "No account", description: `No user found for ${id}.` });
         setBusy(false);
         return;
       }
@@ -57,7 +52,7 @@ export default function Auth() {
       const profile = profSnap.data() as any;
       localStorage.setItem("name", profile.name || "");
       localStorage.setItem("email", profile.email || email);
-      localStorage.setItem("loginId", profile.loginId || loginId);
+      localStorage.setItem("loginId", profile.loginId || id);
       localStorage.setItem("role", profile.role || "");
 
       if (profile.role === "ADMIN") navigate("/dashboard/admin");
@@ -75,68 +70,6 @@ export default function Auth() {
     }
   };
 
-  // --- Forgot password helpers ---
-  const openForgot = () => {
-    setShowReset(true);
-    setResetLoginId(loginId || "");
-    setOtpSent(false);
-    setEmailMasked("");
-    setSessionId("");
-    setOtp("");
-    setNewPass("");
-    setConfirm("");
-  };
-
-  const handleSendOtp = async () => {
-    if (!resetLoginId.trim()) {
-      toast({ variant: "destructive", title: "Login ID required", description: "Enter your Login ID to receive OTP." });
-      return;
-    }
-    setBusyReset(true);
-    try {
-      const res: any = await sendPasswordOtp({ loginId: resetLoginId.trim() });
-      setSessionId(res.data.sessionId);
-      setEmailMasked(res.data.emailMasked);
-      setOtpSent(true);
-      toast({ title: "OTP sent", description: `We emailed a 6-digit code to ${res.data.emailMasked}` });
-    } catch (err: any) {
-      console.error("[send otp] failed", err);
-      toast({ variant: "destructive", title: "Could not send OTP", description: err?.message || err?.code || "Try again." });
-    } finally {
-      setBusyReset(false);
-    }
-  };
-
-  const handleResetPassword = async () => {
-    if (!/^\d{6}$/.test(otp)) {
-      toast({ variant: "destructive", title: "Invalid OTP", description: "Enter the 6-digit code from your email." });
-      return;
-    }
-    if (newPass.length < 8) {
-      toast({ variant: "destructive", title: "Weak password", description: "Minimum 8 characters." });
-      return;
-    }
-    if (newPass !== confirm) {
-      toast({ variant: "destructive", title: "Password mismatch", description: "Passwords do not match." });
-      return;
-    }
-    setBusyReset(true);
-    try {
-      const res: any = await verifyPasswordOtp({ sessionId, otp, newPassword: newPass });
-      if (res?.data?.ok) {
-        toast({ title: "Password updated", description: "You can now log in with your new password." });
-        setShowReset(false);
-      } else {
-        throw new Error("Unexpected response");
-      }
-    } catch (err: any) {
-      console.error("[verify otp] failed", err);
-      toast({ variant: "destructive", title: "Could not reset", description: err?.message || err?.code || "Try again." });
-    } finally {
-      setBusyReset(false);
-    }
-  };
-
   return (
     <div className="min-h-screen flex items-center justify-center p-4">
       <Card className="max-w-md w-full">
@@ -147,7 +80,17 @@ export default function Auth() {
         <CardContent className="space-y-3">
           {/* LOGIN FORM */}
           <div>
-            <Label>Login ID</Label>
+            <div className="flex items-center justify-between">
+              <Label>Login ID</Label>
+              {/* Link to multi-page forgot flow */}
+              <button
+                type="button"
+                onClick={() => navigate("/forgot")}
+                className="text-sm underline text-primary hover:opacity-80"
+              >
+                Forgot password?
+              </button>
+            </div>
             <Input
               value={loginId}
               onChange={(e) => setLoginId(e.target.value)}
@@ -156,16 +99,7 @@ export default function Auth() {
           </div>
 
           <div>
-            <div className="flex items-center justify-between">
-              <Label>Password</Label>
-              <button
-                type="button"
-                onClick={openForgot}
-                className="text-sm underline text-primary hover:opacity-80"
-              >
-                Forgot password?
-              </button>
-            </div>
+            <Label>Password</Label>
             <Input
               type="password"
               value={password}
@@ -183,76 +117,6 @@ export default function Auth() {
               Sign up
             </button>
           </div>
-
-          {/* RESET PANEL */}
-          {showReset && (
-            <div className="mt-6 border rounded p-3 space-y-3">
-              <h3 className="font-medium">Reset password</h3>
-
-              {!otpSent ? (
-                <>
-                  <div>
-                    <Label>Login ID</Label>
-                    <Input
-                      value={resetLoginId}
-                      onChange={(e) => setResetLoginId(e.target.value)}
-                      placeholder="Your Login ID"
-                    />
-                  </div>
-                  <Button onClick={handleSendOtp} disabled={busyReset}>
-                    {busyReset ? "Sending…" : "Send OTP to email"}
-                  </Button>
-                  <p className="text-xs text-muted-foreground">
-                    We’ll email a 6-digit code to the address linked with this Login ID.
-                  </p>
-                </>
-              ) : (
-                <>
-                  <p className="text-sm">
-                    OTP sent to <strong>{emailMasked}</strong>
-                  </p>
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <Label>Enter OTP</Label>
-                      <Input
-                        value={otp}
-                        onChange={(e) => setOtp(e.target.value.replace(/\D/g, "").slice(0, 6))}
-                        placeholder="6-digit code"
-                        inputMode="numeric"
-                      />
-                    </div>
-                    <div>
-                      <Label>New password</Label>
-                      <Input
-                        type="password"
-                        value={newPass}
-                        onChange={(e) => setNewPass(e.target.value)}
-                        placeholder="Min 8 chars"
-                      />
-                    </div>
-                  </div>
-                  <div>
-                    <Label>Confirm password</Label>
-                    <Input
-                      type="password"
-                      value={confirm}
-                      onChange={(e) => setConfirm(e.target.value)}
-                      placeholder="Re-enter password"
-                    />
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <Button onClick={handleResetPassword} disabled={busyReset || !sessionId}>
-                      {busyReset ? "Updating…" : "Reset password"}
-                    </Button>
-                    <button className="text-sm underline" onClick={() => setShowReset(false)}>
-                      Cancel
-                    </button>
-                  </div>
-                  <p className="text-xs text-muted-foreground">Code expires in 10 minutes.</p>
-                </>
-              )}
-            </div>
-          )}
         </CardContent>
       </Card>
     </div>
