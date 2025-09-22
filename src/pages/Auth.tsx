@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, Link } from "react-router-dom";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -7,9 +7,25 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/components/ui/use-toast";
 
-import { auth, db } from "@/firebaseConfig";
+import { auth, db, functions } from "@/firebaseConfig";
 import { signInWithEmailAndPassword } from "firebase/auth";
-import { doc, getDoc } from "firebase/firestore";
+import { httpsCallable } from "firebase/functions";
+
+/**
+ * Assumptions:
+ * - You have a callable Cloud Function named "resolveLoginEmail" that accepts { loginId }
+ *   and returns { email } if found (or throws if not).
+ *   If you don't have it yet, create a simple callable in your Functions:
+ *
+ *   export const resolveLoginEmail = functions.https.onCall(async (data) => {
+ *     const loginId = (data?.loginId || "").trim();
+ *     if (!loginId) throw new functions.https.HttpsError("invalid-argument", "loginId required");
+ *     const snap = await admin.firestore().collection("users").where("loginId","==",loginId).limit(1).get();
+ *     if (snap.empty) throw new functions.https.HttpsError("not-found", "User not found");
+ *     const u = snap.docs[0].data();
+ *     return { email: u.email };
+ *   });
+ */
 
 export default function Auth() {
   const navigate = useNavigate();
@@ -20,103 +36,86 @@ export default function Auth() {
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
 
-  const handlePasswordLogin = async () => {
-    const id = loginId.trim();
-    if (!id) {
-      toast({ variant: "destructive", title: "Login ID required", description: "Enter your Login ID to continue." });
-      return;
+  async function resolveEmailFromLoginId(id: string): Promise<string> {
+    // If user typed an email directly, accept it
+    if (id.includes("@")) return id;
+
+    // Otherwise call the backend function to resolve loginId -> email
+    const fn = httpsCallable(functions, "resolveLoginEmail");
+    const res: any = await fn({ loginId: id });
+    const email = res?.data?.email;
+    if (!email) {
+      throw new Error("Account not found for the given Login ID");
     }
-    if (!password) {
-      toast({ variant: "destructive", title: "Password required", description: "Enter your password to continue." });
+    return email;
+  }
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!loginId.trim() || !password.trim()) {
+      toast({ title: "Please enter Login ID and Password", variant: "destructive" });
       return;
     }
 
-    setBusy(true);
     try {
-      // map loginId -> { email, uid }
-      const lookupSnap = await getDoc(doc(db, "loginLookup", id));
-      if (!lookupSnap.exists()) {
-        toast({ variant: "destructive", title: "No account", description: `No user found for ${id}.` });
-        setBusy(false);
-        return;
-      }
-      const { email } = lookupSnap.data() as { email: string; uid: string };
-
+      setBusy(true);
+      const email = await resolveEmailFromLoginId(loginId.trim());
       await signInWithEmailAndPassword(auth, email, password);
 
-      const uid = auth.currentUser?.uid;
-      if (!uid) throw new Error("Signed in, but no Auth UID found.");
-      const profSnap = await getDoc(doc(db, "users", uid));
-      if (!profSnap.exists()) throw new Error("Profile not found.");
-
-      const profile = profSnap.data() as any;
-      localStorage.setItem("name", profile.name || "");
-      localStorage.setItem("email", profile.email || email);
-      localStorage.setItem("loginId", profile.loginId || id);
-      localStorage.setItem("role", profile.role || "");
-
-      if (profile.role === "ADMIN") navigate("/dashboard/admin");
-      else if (profile.role === "FACULTY") navigate("/dashboard/faculty");
-      else navigate("/dashboard/student");
+      toast({ title: "Signed in successfully" });
+      // Change this to wherever your dashboard/home is
+      navigate("/");
     } catch (err: any) {
-      console.error("[login] failed", err);
-      toast({
-        variant: "destructive",
-        title: "Login failed",
-        description: err?.message || "Check your Login ID and password.",
-      });
+      const message = err?.message || "Login failed";
+      toast({ title: "Login failed", description: message, variant: "destructive" });
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center p-4">
-      <Card className="max-w-md w-full">
-        <CardHeader className="text-center">
-          <CardTitle>Log In</CardTitle>
+    <div className="min-h-screen flex items-center justify-center p-6">
+      <Card className="w-full max-w-md">
+        <CardHeader>
+          <CardTitle>Sign in to AI-LAB</CardTitle>
         </CardHeader>
 
-        <CardContent className="space-y-3">
-          {/* LOGIN FORM */}
-          <div>
-            <div className="flex items-center justify-between">
-              <Label>Login ID</Label>
-              {/* Link to multi-page forgot flow */}
-              <button
-                type="button"
-                onClick={() => navigate("/forgot")}
-                className="text-sm underline text-primary hover:opacity-80"
-              >
-                Forgot password?
-              </button>
+        <CardContent>
+          <form onSubmit={handleLogin} className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="loginId">Login ID (or Email)</Label>
+              <Input
+                id="loginId"
+                placeholder="e.g. A0001 or you@sastra.ac.in"
+                value={loginId}
+                onChange={(e) => setLoginId(e.target.value)}
+                autoComplete="username"
+              />
             </div>
-            <Input
-              value={loginId}
-              onChange={(e) => setLoginId(e.target.value)}
-              placeholder="e.g., 126179012 or F3210 or A0001"
-            />
-          </div>
 
-          <div>
-            <Label>Password</Label>
-            <Input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-            />
-          </div>
+            <div className="space-y-2">
+              <Label htmlFor="password">Password</Label>
+              <Input
+                id="password"
+                type="password"
+                placeholder="********"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                autoComplete="current-password"
+              />
+            </div>
 
-          <Button className="w-full" onClick={handlePasswordLogin} disabled={busy}>
-            {busy ? "Logging in…" : "Log In"}
-          </Button>
+            <div className="flex items-center justify-between">
+              <div />
+              <Link to="/forgot" className="text-sm text-primary hover:underline">
+                Forgot password?
+              </Link>
+            </div>
 
-          <div className="text-sm text-center">
-            Don’t have an account?{" "}
-            <button className="underline" onClick={() => navigate("/signup")}>
-              Sign up
-            </button>
-          </div>
+            <Button type="submit" className="w-full" disabled={busy}>
+              {busy ? "Signing in..." : "Sign In"}
+            </Button>
+          </form>
         </CardContent>
       </Card>
     </div>
